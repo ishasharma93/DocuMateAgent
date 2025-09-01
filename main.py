@@ -224,7 +224,7 @@ def get_debug_args():
     class DebugArgs:
         def __init__(self):
             # Repository settings
-            self.repo = os.getenv('DEBUG_REPO_URL', 'ishasharma93/DocuMateAgent')
+            self.repo = os.getenv('DEBUG_REPO_URL', 'facebook/react')
             self.repo_url = None
             self.output = os.getenv('DEBUG_OUTPUT_FILE', 'debug_analysis.md')
             
@@ -275,7 +275,7 @@ def main():
         if is_debug_mode():
             print("🔍 Debug Mode Activated")
             print("=" * 30)
-            print(f"📁 Repository: {os.getenv('DEBUG_REPO_URL', 'ishasharma93/DocuMateAgent')}")
+            print(f"📁 Repository: {os.getenv('DEBUG_REPO_URL', 'facebook/react')}")
             print(f"📄 Output: {os.getenv('DEBUG_OUTPUT_FILE', 'debug_analysis.md')}")
             print(f"⚡ Quick Analysis: {os.getenv('DEBUG_QUICK_ANALYSIS', 'true')}")
             print(f"🤖 Use Azure: {os.getenv('DEBUG_USE_AZURE', 'true')}")
