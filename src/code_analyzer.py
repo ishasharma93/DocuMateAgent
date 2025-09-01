@@ -12,6 +12,11 @@ from pathlib import Path
 import logging
 from collections import defaultdict, Counter
 
+def get_int_from_env(env_var: str, default: int) -> int:
+    """Get integer value from environment variable, handling comments"""
+    value_str = os.getenv(env_var, str(default)).split('#')[0].strip()
+    return int(value_str)
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,7 +116,8 @@ class CodeAnalyzer:
     }
     
     def __init__(self):
-        self.max_file_size = int(os.getenv('MAX_FILE_SIZE', 1024 * 1024))  # 1MB default
+        # Handle environment variables that might have comments
+        self.max_file_size = get_int_from_env('MAX_FILE_SIZE', 1048576)  # Default 1MB
         self.supported_extensions = set(self.LANGUAGE_EXTENSIONS.keys())
     
     def analyze_repository_structure(self, contents: List[Dict[str, Any]]) -> Dict[str, Any]:

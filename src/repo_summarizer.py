@@ -8,6 +8,15 @@ import os
 import logging
 from typing import Dict, List, Any, Optional, Union
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+def get_int_from_env(env_var: str, default: int) -> int:
+    """Get integer value from environment variable, handling comments"""
+    value_str = os.getenv(env_var, str(default)).split('#')[0].strip()
+    return int(value_str)
 
 from .github_client import GitHubClient
 from .code_analyzer import CodeAnalyzer
@@ -31,34 +40,49 @@ class GitHubRepoSummarizer:
                  max_file_size: int = 1024*1024,
                  llm_api_key: Optional[str] = None,
                  llm_model: str = "gpt-4",
-                 enable_llm_analysis: bool = True):
+                 enable_llm_analysis: bool = True,
+                 use_azure: bool = None,
+                 azure_endpoint: Optional[str] = None,
+                 azure_deployment: Optional[str] = None):
         """
         Initialize the repository summarizer
         
         Args:
             github_token: GitHub personal access token for API access
             max_file_size: Maximum file size to analyze in bytes (default: 1MB)
-            llm_api_key: OpenAI or other LLM API key for code analysis
+            llm_api_key: OpenAI or Azure OpenAI API key for code analysis
             llm_model: LLM model to use (gpt-4, gpt-3.5-turbo, etc.)
             enable_llm_analysis: Whether to perform LLM-powered code analysis
+            use_azure: Whether to use Azure OpenAI (auto-detected if None)
+            azure_endpoint: Azure OpenAI endpoint URL
+            azure_deployment: Azure OpenAI deployment name
         """
         self.github_client = GitHubClient(github_token)
         self.code_analyzer = CodeAnalyzer()
         self.markdown_generator = MarkdownGenerator()
         self.max_file_size = max_file_size
         
+        # Set Azure environment variables if provided via parameters
+        if azure_endpoint:
+            os.environ['AZURE_OPENAI_ENDPOINT'] = azure_endpoint
+        if azure_deployment:
+            os.environ['AZURE_OPENAI_DEPLOYMENT_NAME'] = azure_deployment
+        if llm_api_key and use_azure:
+            os.environ['AZURE_OPENAI_API_KEY'] = llm_api_key
+        
         # LLM Analysis setup
         self.enable_llm_analysis = enable_llm_analysis
         if enable_llm_analysis:
             self.llm_analyzer = LLMCodeAnalyzer(
                 api_key=llm_api_key,
-                model=llm_model
+                model=llm_model,
+                use_azure=use_azure
             )
         else:
             self.llm_analyzer = None
         
         # Configuration
-        self.max_files_to_analyze = int(os.getenv('MAX_FILES_TO_ANALYZE', 500))
+        self.max_files_to_analyze = get_int_from_env('MAX_FILES_TO_ANALYZE', 500)
         self.excluded_dirs = {
             '.git', 'node_modules', '__pycache__', '.pytest_cache', 
             'venv', 'env', '.env', 'dist', 'build', 'target',

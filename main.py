@@ -14,6 +14,10 @@ import argparse
 import logging
 from pathlib import Path
 from typing import Optional
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Add src directory to Python path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
@@ -126,6 +130,31 @@ Environment Variables:
         help='Disable LLM-powered code analysis'
     )
     
+    # Azure OpenAI specific arguments
+    parser.add_argument(
+        '--azure-openai-key',
+        type=str,
+        help='Azure OpenAI API key (overrides AZURE_OPENAI_API_KEY env var)'
+    )
+    
+    parser.add_argument(
+        '--azure-openai-endpoint',
+        type=str,
+        help='Azure OpenAI endpoint URL (overrides AZURE_OPENAI_ENDPOINT env var)'
+    )
+    
+    parser.add_argument(
+        '--azure-openai-deployment',
+        type=str,
+        help='Azure OpenAI deployment name (overrides AZURE_OPENAI_DEPLOYMENT_NAME env var)'
+    )
+    
+    parser.add_argument(
+        '--use-azure',
+        action='store_true',
+        help='Force use of Azure OpenAI instead of regular OpenAI'
+    )
+    
     return parser
 
 
@@ -190,12 +219,74 @@ Get an OpenAI API key at: https://platform.openai.com/api-keys
     return api_key
 
 
+def get_debug_args():
+    """Get arguments from environment variables for debug mode"""
+    class DebugArgs:
+        def __init__(self):
+            # Repository settings
+            self.repo = os.getenv('DEBUG_REPO_URL', 'ishasharma93/DocuMateAgent')
+            self.repo_url = None
+            self.output = os.getenv('DEBUG_OUTPUT_FILE', 'debug_analysis.md')
+            
+            # Debug settings
+            self.verbose = True  # Always verbose in debug mode
+            self.quick = os.getenv('DEBUG_QUICK_ANALYSIS', 'true').lower() == 'true'
+            self.type = 'quick' if self.quick else 'full'
+            
+            # Token settings
+            self.token = None  # Will use environment variable
+            
+            # LLM settings
+            self.llm_api_key = None  # Will use environment variable
+            self.llm_model = os.getenv('DEBUG_LLM_MODEL', 'gpt-4')
+            self.disable_llm = os.getenv('DEBUG_DISABLE_LLM', 'false').lower() == 'true'
+            
+            # Azure OpenAI settings
+            self.azure_openai_key = None  # Will use environment variable
+            self.azure_openai_endpoint = None  # Will use environment variable
+            self.azure_openai_deployment = None  # Will use environment variable
+            self.use_azure = os.getenv('DEBUG_USE_AZURE', 'true').lower() == 'true'
+            
+            # Analysis settings - handle comments in env vars
+            max_file_size_str = os.getenv('MAX_FILE_SIZE', '1048576').split('#')[0].strip()
+            max_files_str = os.getenv('MAX_FILES_TO_ANALYZE', '500').split('#')[0].strip()
+            
+            self.max_file_size = int(max_file_size_str)
+            self.max_files = int(max_files_str)
+            
+    return DebugArgs()
+
+
+def is_debug_mode():
+    """Check if we're running in debug mode"""
+    # Check if DEBUG_MODE is set in environment
+    debug_mode = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
+    
+    # Also check if no command line arguments are provided (common in VS Code debugging)
+    no_args = len(sys.argv) == 1
+    
+    return debug_mode or no_args
+
+
 def main():
     """Main CLI entry point"""
     try:
-        # Parse arguments
-        parser = setup_argparser()
-        args = parser.parse_args()
+        # Check if we're in debug mode
+        if is_debug_mode():
+            print("🔍 Debug Mode Activated")
+            print("=" * 30)
+            print(f"📁 Repository: {os.getenv('DEBUG_REPO_URL', 'ishasharma93/DocuMateAgent')}")
+            print(f"📄 Output: {os.getenv('DEBUG_OUTPUT_FILE', 'debug_analysis.md')}")
+            print(f"⚡ Quick Analysis: {os.getenv('DEBUG_QUICK_ANALYSIS', 'true')}")
+            print(f"🤖 Use Azure: {os.getenv('DEBUG_USE_AZURE', 'true')}")
+            print("=" * 30)
+            
+            # Use debug arguments from environment
+            args = get_debug_args()
+        else:
+            # Parse command line arguments normally
+            parser = setup_argparser()
+            args = parser.parse_args()
         
         # Setup logging
         setup_logging(args.verbose)
@@ -206,8 +297,20 @@ def main():
         # Get GitHub token
         github_token = get_github_token(args)
         
-        # Get LLM API key
+        # Get LLM API key (Azure or regular OpenAI)
         llm_api_key = get_llm_api_key(args)
+        
+        # Handle Azure OpenAI specific parameters
+        azure_endpoint = args.azure_openai_endpoint or os.getenv('AZURE_OPENAI_ENDPOINT')
+        azure_deployment = args.azure_openai_deployment or os.getenv('AZURE_OPENAI_DEPLOYMENT_NAME')
+        azure_api_key = args.azure_openai_key or os.getenv('AZURE_OPENAI_API_KEY')
+        
+        # Use Azure if explicitly requested or if Azure credentials are available
+        use_azure = args.use_azure or bool(azure_api_key and azure_endpoint)
+        
+        # Use Azure API key if available and using Azure
+        if use_azure and azure_api_key:
+            llm_api_key = azure_api_key
         
         # Determine analysis type
         if args.quick or args.type == 'quick':
@@ -225,7 +328,10 @@ def main():
             max_file_size=args.max_file_size,
             llm_api_key=llm_api_key,
             llm_model=args.llm_model,
-            enable_llm_analysis=not args.disable_llm
+            enable_llm_analysis=not args.disable_llm,
+            use_azure=use_azure,
+            azure_endpoint=azure_endpoint,
+            azure_deployment=azure_deployment
         )
         
         # Set additional configuration
@@ -299,9 +405,9 @@ def demo_usage():
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 1:
-        # Show demo if no arguments provided
-        demo_usage()
-        sys.exit(0)
+    # if len(sys.argv) == 1:
+    #     # Show demo if no arguments provided
+    #     demo_usage()
+    #     sys.exit(0)
     
     main()

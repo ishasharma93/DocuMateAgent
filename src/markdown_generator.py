@@ -714,14 +714,27 @@ Based on the analysis, here are some suggestions for improvement:
         if llm_analysis:
             llm_suggestions = []
             for explanation in llm_analysis.values():
-                llm_suggestions.extend(explanation.improvement_suggestions)
+                if hasattr(explanation, 'improvement_suggestions') and explanation.improvement_suggestions:
+                    # Ensure we only add string suggestions
+                    for suggestion in explanation.improvement_suggestions:
+                        if isinstance(suggestion, str):
+                            llm_suggestions.append(suggestion)
+                        elif isinstance(suggestion, dict):
+                            # If it's a dict, try to extract a meaningful string
+                            if 'text' in suggestion:
+                                llm_suggestions.append(suggestion['text'])
+                            elif 'description' in suggestion:
+                                llm_suggestions.append(suggestion['description'])
+                            else:
+                                # Convert dict to string as fallback
+                                llm_suggestions.append(str(suggestion))
             
             # Group similar suggestions
             if llm_suggestions:
-                # Extract common themes
-                testing_suggestions = [s for s in llm_suggestions if 'test' in s.lower()]
-                error_suggestions = [s for s in llm_suggestions if any(word in s.lower() for word in ['error', 'exception', 'handling'])]
-                performance_suggestions = [s for s in llm_suggestions if 'performance' in s.lower()]
+                # Extract common themes - now we know all items are strings
+                testing_suggestions = [s for s in llm_suggestions if isinstance(s, str) and 'test' in s.lower()]
+                error_suggestions = [s for s in llm_suggestions if isinstance(s, str) and any(word in s.lower() for word in ['error', 'exception', 'handling'])]
+                performance_suggestions = [s for s in llm_suggestions if isinstance(s, str) and 'performance' in s.lower()]
                 
                 if testing_suggestions:
                     recs.append("🧪 **AI-Identified Testing Improvements:** " + testing_suggestions[0])
