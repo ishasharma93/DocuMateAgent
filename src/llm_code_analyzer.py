@@ -417,9 +417,11 @@ Be specific and technical, but explain in a way that helps understanding rather 
         try:
             # For Azure OpenAI, use the deployment name as the model
             model_to_use = self.deployment_name if self.use_azure else self.model
+
+            # mcp server instantiated for Azure DevOps API
             
             response = await self.client.chat.completions.create(
-                model=model_to_use,
+                model=model_to_use,                
                 messages=[
                     {
                         "role": "system",
@@ -432,7 +434,8 @@ Be specific and technical, but explain in a way that helps understanding rather 
                 ],
                 max_tokens=1500,
                 temperature=0.1,
-                timeout=60.0
+                timeout=60.0,
+                tools=[]
             )
             
             return response.choices[0].message.content
