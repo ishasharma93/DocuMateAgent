@@ -27,6 +27,18 @@ except ImportError:
     AsyncOpenAI = None
     AsyncAzureOpenAI = None
 
+# Import MCP server-client components
+try:
+    from .mcp.azure_devops_client import AzureDevOpsClient
+    from .mcp.github_client import GitHubMCPClient
+    from .mcp.client import MCPClient
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
+    AzureDevOpsClient = None
+    GitHubMCPClient = None
+    MCPClient = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,15 +63,23 @@ class LLMCodeAnalyzer:
                  api_key: Optional[str] = None,
                  model: str = "gpt-4",
                  api_base: Optional[str] = None,
-                 use_azure: bool = None):
+                 use_azure: bool = None,
+                 enable_mcp: bool = True,
+                 azure_devops_org: Optional[str] = None,
+                 azure_devops_pat: Optional[str] = None,
+                 github_token: Optional[str] = None):
         """
-        Initialize LLM Code Analyzer
+        Initialize LLM Code Analyzer with MCP server-client support
         
         Args:
             api_key: OpenAI or Azure OpenAI API key
             model: Model to use (gpt-4, gpt-3.5-turbo, etc.)
             api_base: Custom API base URL (optional)
             use_azure: Force Azure OpenAI usage (auto-detected if None)
+            enable_mcp: Enable MCP server-client functionality
+            azure_devops_org: Azure DevOps organization name
+            azure_devops_pat: Azure DevOps Personal Access Token
+            github_token: GitHub Personal Access Token
         """
         # Auto-detect Azure usage if not specified
         if use_azure is None:
@@ -117,6 +137,32 @@ class LLMCodeAnalyzer:
         self.max_code_length = get_int_from_env('MAX_CODE_LENGTH_FOR_LLM', 8000)
         self.max_concurrent_requests = get_int_from_env('MAX_CONCURRENT_LLM_REQUESTS', 3)
         
+        # Initialize MCP servers if enabled
+        self.mcp_enabled = enable_mcp and MCP_AVAILABLE
+        self.azure_devops_client = None
+        self.github_mcp_client = None
+        
+        if self.mcp_enabled:
+            try:
+                # Initialize Azure DevOps MCP client
+                if azure_devops_org or os.getenv('AZURE_DEVOPS_ORGANIZATION'):
+                    self.azure_devops_client = AzureDevOpsClient(
+                        organization=azure_devops_org,
+                        personal_access_token=azure_devops_pat
+                    )
+                    logger.info("Azure DevOps MCP client initialized")
+                
+                # Initialize GitHub MCP client
+                if github_token or os.getenv('GITHUB_TOKEN'):
+                    self.github_mcp_client = GitHubMCPClient(
+                        github_token=github_token
+                    )
+                    logger.info("GitHub MCP client initialized")
+                    
+            except Exception as e:
+                logger.warning(f"Failed to initialize MCP clients: {e}")
+                self.mcp_enabled = False
+        
         # Supported file extensions for detailed analysis
         self.code_extensions = {
             '.py': 'Python',
@@ -140,6 +186,270 @@ class LLMCodeAnalyzer:
             '.bash': 'Bash Script',
             '.ps1': 'PowerShell'
         }
+    
+    async def analyze_repository_with_mcp(self, 
+                                         repository_url: str,
+                                         repository_type: str = "github") -> Dict[str, Any]:
+        """
+        Analyze a repository using MCP server-client architecture
+        
+        Args:
+            repository_url: Repository URL (GitHub or Azure DevOps)
+            repository_type: Type of repository ("github" or "azure_devops")
+            
+        Returns:
+            Repository analysis results with MCP integration
+        """
+        if not self.mcp_enabled:
+            logger.warning("MCP not enabled, falling back to basic analysis")
+            return {"error": "MCP not enabled"}
+        
+        try:
+            if repository_type == "github":
+                return await self._analyze_github_repository(repository_url)
+            elif repository_type == "azure_devops":
+                return await self._analyze_azure_devops_repository(repository_url)
+            else:
+                return {"error": f"Unsupported repository type: {repository_type}"}
+        except Exception as e:
+            logger.error(f"MCP repository analysis failed: {e}")
+            return {"error": str(e)}
+    
+    async def _analyze_github_repository(self, repository_url: str) -> Dict[str, Any]:
+        """Analyze GitHub repository using MCP client"""
+        if not self.github_mcp_client:
+            raise Exception("GitHub MCP client not initialized")
+        
+        # Parse repository URL to extract owner and repo
+        import re
+        match = re.match(r'https://github\.com/([^/]+)/([^/]+)/?', repository_url)
+        if not match:
+            return {"error": "Invalid GitHub repository URL"}
+        
+        owner, repo = match.groups()
+        repo = repo.rstrip('.git')  # Remove .git suffix if present
+        
+        logger.info(f"Analyzing GitHub repository: {owner}/{repo}")
+        
+        # Gather repository information using MCP tools
+        analysis_results = {}
+        
+        try:
+            # Get basic repository info
+            repo_info = await self.github_mcp_client._get_repository_info(owner, repo)
+            analysis_results['repository_info'] = repo_info
+            
+            # Get repository structure
+            contents = await self.github_mcp_client._get_repository_contents(owner, repo)
+            analysis_results['contents'] = contents
+            
+            # Get languages
+            languages = await self.github_mcp_client._get_languages(owner, repo)
+            analysis_results['languages'] = languages
+            
+            # Get recent commits
+            commits = await self.github_mcp_client._get_commits(owner, repo, per_page=5)
+            analysis_results['recent_commits'] = commits
+            
+            # Get branches
+            branches = await self.github_mcp_client._get_branches(owner, repo, per_page=5)
+            analysis_results['branches'] = branches
+            
+            # Get pull requests
+            pull_requests = await self.github_mcp_client._get_pull_requests(owner, repo, per_page=5)
+            analysis_results['pull_requests'] = pull_requests
+            
+            logger.info(f"GitHub MCP analysis completed for {owner}/{repo}")
+            return analysis_results
+            
+        except Exception as e:
+            logger.error(f"GitHub MCP analysis failed for {owner}/{repo}: {e}")
+            raise
+    
+    async def _analyze_azure_devops_repository(self, repository_url: str) -> Dict[str, Any]:
+        """Analyze Azure DevOps repository using MCP client"""
+        if not self.azure_devops_client:
+            raise Exception("Azure DevOps MCP client not initialized")
+        
+        # Parse Azure DevOps URL to extract organization, project, and repository
+        import re
+        match = re.match(r'https://dev\.azure\.com/([^/]+)/([^/]+)/_git/([^/]+)/?', repository_url)
+        if not match:
+            # Try alternative format
+            match = re.match(r'https://([^.]+)\.visualstudio\.com/([^/]+)/_git/([^/]+)/?', repository_url)
+            if not match:
+                return {"error": "Invalid Azure DevOps repository URL"}
+        
+        org, project, repo = match.groups()
+        
+        logger.info(f"Analyzing Azure DevOps repository: {org}/{project}/{repo}")
+        
+        # Gather repository information using MCP tools
+        analysis_results = {}
+        
+        try:
+            # Get basic repository info
+            repo_info = await self.azure_devops_client._get_repository_info(project, repo)
+            analysis_results['repository_info'] = repo_info
+            
+            # Get repository structure
+            contents = await self.azure_devops_client._get_repository_contents(project, repo)
+            analysis_results['contents'] = contents
+            
+            # Get recent commits
+            commits = await self.azure_devops_client._get_commits(project, repo, top=5)
+            analysis_results['recent_commits'] = commits
+            
+            # Get pull requests
+            pull_requests = await self.azure_devops_client._get_pull_requests(project, repo)
+            analysis_results['pull_requests'] = pull_requests
+            
+            logger.info(f"Azure DevOps MCP analysis completed for {org}/{project}/{repo}")
+            return analysis_results
+            
+        except Exception as e:
+            logger.error(f"Azure DevOps MCP analysis failed for {org}/{project}/{repo}: {e}")
+            raise
+    
+    async def get_mcp_repository_files(self, 
+                                      repository_url: str,
+                                      repository_type: str = "github",
+                                      max_files: int = 50) -> Dict[str, str]:
+        """
+        Get repository files content using MCP clients
+        
+        Args:
+            repository_url: Repository URL
+            repository_type: Type of repository ("github" or "azure_devops")
+            max_files: Maximum number of files to retrieve
+            
+        Returns:
+            Dictionary mapping file paths to their contents
+        """
+        if not self.mcp_enabled:
+            logger.warning("MCP not enabled, returning empty file list")
+            return {}
+        
+        try:
+            if repository_type == "github":
+                return await self._get_github_files(repository_url, max_files)
+            elif repository_type == "azure_devops":
+                return await self._get_azure_devops_files(repository_url, max_files)
+            else:
+                raise ValueError(f"Unsupported repository type: {repository_type}")
+        except Exception as e:
+            logger.error(f"Failed to get MCP repository files: {e}")
+            return {}
+    
+    async def _get_github_files(self, repository_url: str, max_files: int) -> Dict[str, str]:
+        """Get GitHub repository files using MCP"""
+        if not self.github_mcp_client:
+            return {}
+        
+        # Parse repository URL
+        import re
+        match = re.match(r'https://github\.com/([^/]+)/([^/]+)/?', repository_url)
+        if not match:
+            return {}
+        
+        owner, repo = match.groups()
+        repo = repo.rstrip('.git')
+        
+        file_contents = {}
+        files_processed = 0
+        
+        async def process_directory(path: str = ""):
+            nonlocal files_processed
+            if files_processed >= max_files:
+                return
+            
+            try:
+                contents = await self.github_mcp_client._get_repository_contents(owner, repo, path)
+                
+                if isinstance(contents, list):
+                    for item in contents:
+                        if files_processed >= max_files:
+                            break
+                        
+                        if item['type'] == 'file':
+                            # Check if it's a code file
+                            file_path = item['path']
+                            _, ext = os.path.splitext(file_path)
+                            
+                            if ext.lower() in self.code_extensions and item['size'] < self.max_code_length:
+                                try:
+                                    file_content = await self.github_mcp_client._get_file_content(owner, repo, file_path)
+                                    if 'decoded_content' in file_content:
+                                        file_contents[file_path] = file_content['decoded_content']
+                                        files_processed += 1
+                                        logger.debug(f"Retrieved file: {file_path}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to get file {file_path}: {e}")
+                        
+                        elif item['type'] == 'dir' and files_processed < max_files:
+                            # Recursively process subdirectories (limited depth)
+                            if len(item['path'].split('/')) < 3:  # Limit recursion depth
+                                await process_directory(item['path'])
+            
+            except Exception as e:
+                logger.warning(f"Failed to process directory {path}: {e}")
+        
+        await process_directory()
+        return file_contents
+    
+    async def _get_azure_devops_files(self, repository_url: str, max_files: int) -> Dict[str, str]:
+        """Get Azure DevOps repository files using MCP"""
+        if not self.azure_devops_client:
+            return {}
+        
+        # Parse Azure DevOps URL
+        import re
+        match = re.match(r'https://dev\.azure\.com/([^/]+)/([^/]+)/_git/([^/]+)/?', repository_url)
+        if not match:
+            match = re.match(r'https://([^.]+)\.visualstudio\.com/([^/]+)/_git/([^/]+)/?', repository_url)
+            if not match:
+                return {}
+        
+        org, project, repo = match.groups()
+        
+        file_contents = {}
+        files_processed = 0
+        
+        try:
+            # Get repository contents with full recursion
+            contents = await self.azure_devops_client._get_repository_contents(
+                project, repo, recursionLevel="Full"
+            )
+            
+            for item in contents.get('value', []):
+                if files_processed >= max_files:
+                    break
+                
+                if not item.get('isFolder', True):  # It's a file
+                    file_path = item.get('path', '').lstrip('/')
+                    _, ext = os.path.splitext(file_path)
+                    
+                    if ext.lower() in self.code_extensions and item.get('size', 0) < self.max_code_length:
+                        try:
+                            file_content = await self.azure_devops_client._get_file_content(project, repo, file_path)
+                            if 'content' in file_content:
+                                file_contents[file_path] = file_content['content']
+                                files_processed += 1
+                                logger.debug(f"Retrieved file: {file_path}")
+                        except Exception as e:
+                            logger.warning(f"Failed to get file {file_path}: {e}")
+        
+        except Exception as e:
+            logger.warning(f"Failed to get Azure DevOps files: {e}")
+        
+        return file_contents
+    
+    async def close_mcp_clients(self):
+        """Close MCP client connections"""
+        if self.azure_devops_client:
+            await self.azure_devops_client.close()
+        if self.github_mcp_client:
+            await self.github_mcp_client.close()
     
     async def analyze_codebase(self, 
                               file_contents: Dict[str, str],
@@ -418,7 +728,8 @@ Be specific and technical, but explain in a way that helps understanding rather 
             # For Azure OpenAI, use the deployment name as the model
             model_to_use = self.deployment_name if self.use_azure else self.model
 
-            # mcp server instantiated for Azure DevOps API
+            # MCP servers instantiated for Azure DevOps and GitHub API integration
+            # This provides LLMs with structured access to repository analysis tools
             
             response = await self.client.chat.completions.create(
                 model=model_to_use,                
