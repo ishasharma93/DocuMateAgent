@@ -1,6 +1,5 @@
-"""
-Azure DevOps MCP server-client implementation for repository analysis
-"""
+#Azure DevOps MCP server-client implementation for repository analysis
+
 
 import os
 import logging
@@ -15,9 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class AzureDevOpsClient(MCPServer):
-    """
-    Azure DevOps MCP server that provides tools for repository analysis
-    """
+    ##Azure DevOps MCP server that provides tools for repository analysis
     
     def __init__(self, 
                  organization: Optional[str] = None,

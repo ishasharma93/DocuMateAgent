@@ -23,9 +23,9 @@ async def demo_mcp_integration():
     analyzer = LLMCodeAnalyzer(
         enable_mcp=True,
         # Note: In real usage, provide actual credentials
-        azure_devops_org="your-org",  # Set AZURE_DEVOPS_ORGANIZATION env var
-        azure_devops_pat="your-pat",  # Set AZURE_DEVOPS_PAT env var
-        github_token="your-token"     # Set GITHUB_TOKEN env var
+        azure_devops_org=os.getenv('AZURE_DEVOPS_ORGANIZATION'),  # Set AZURE_DEVOPS_ORGANIZATION env var
+        azure_devops_pat=os.getenv('AZURE_DEVOPS_PAT'),  # Set AZURE_DEVOPS_PAT env var
+        github_token=os.getenv('GITHUB_TOKEN')   # Set GITHUB_TOKEN env var
     )
     
     print(f"✅ MCP Integration Status: {'Enabled' if analyzer.mcp_enabled else 'Disabled'}")

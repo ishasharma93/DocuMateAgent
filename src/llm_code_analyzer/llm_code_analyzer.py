@@ -13,19 +13,21 @@ import json
 import asyncio
 from dataclasses import dataclass
 
+
+
 def get_int_from_env(env_var: str, default: int) -> int:
     """Get integer value from environment variable, handling comments"""
     value_str = os.getenv(env_var, str(default)).split('#')[0].strip()
     return int(value_str)
 
-# Use the official OpenAI client (supports both OpenAI and Azure OpenAI)
+
+# Use the official OpenAI client (for non-Azure usage)
 try:
-    from openai import AsyncOpenAI, AsyncAzureOpenAI
+    from openai import AsyncOpenAI
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
     AsyncOpenAI = None
-    AsyncAzureOpenAI = None
 
 # Import MCP server-client components
 try:
@@ -82,43 +84,43 @@ class LLMCodeAnalyzer:
             github_token: GitHub Personal Access Token
         """
         # Auto-detect Azure usage if not specified
+
         if use_azure is None:
-            use_azure = bool(os.getenv('AZURE_OPENAI_API_KEY'))
-        
+            use_azure = bool(os.getenv('AZURE_OPENAI_ENDPOINT'))
         self.use_azure = use_azure
         self.model = model
-        
-        # Check if OpenAI is available and properly configured
-        if not OPENAI_AVAILABLE:
-            logger.error("OpenAI package not available. Install with: pip install openai")
-            self.client = None
-            return
-        
+
         if self.use_azure:
-            # Azure OpenAI configuration
+            # Azure OpenAI configuration using openai package
             self.api_key = api_key or os.getenv('AZURE_OPENAI_API_KEY')
-            self.endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
+            self.api_base = os.getenv('AZURE_OPENAI_ENDPOINT')
             self.api_version = os.getenv('AZURE_OPENAI_API_VERSION', '2024-06-01')
             self.deployment_name = os.getenv('AZURE_OPENAI_DEPLOYMENT_NAME', model)
-            
-            if not self.api_key or not self.endpoint:
-                logger.warning("Azure OpenAI credentials incomplete. Code explanations will be disabled.")
+
+            if not OPENAI_AVAILABLE:
+                logger.error("OpenAI package not available. Install with: pip install openai")
+                self.client = None
+            elif not self.api_key or not self.api_base:
+                logger.warning("Azure OpenAI API key or endpoint not set. Code explanations will be disabled.")
                 self.client = None
             else:
                 try:
-                    self.client = AsyncAzureOpenAI(
+                    self.client = AsyncOpenAI(
                         api_key=self.api_key,
-                        azure_endpoint=self.endpoint,
+                        base_url=self.api_base,
                         api_version=self.api_version
                     )
-                    logger.info(f"Azure OpenAI client initialized - Endpoint: {self.endpoint}, Deployment: {self.deployment_name}")
+                    logger.info(f"Azure OpenAI client initialized - Endpoint: {self.api_base}, Deployment: {self.deployment_name}")
                 except Exception as e:
                     logger.error(f"Failed to initialize Azure OpenAI client: {e}")
                     self.client = None
         else:
             # Regular OpenAI configuration
+            if not OPENAI_AVAILABLE:
+                logger.error("OpenAI package not available. Install with: pip install openai")
+                self.client = None
+                return
             self.api_key = api_key or os.getenv('OPENAI_API_KEY')
-            
             if not self.api_key:
                 logger.warning("No OpenAI API key provided. Code explanations will be disabled.")
                 self.client = None
@@ -464,8 +466,10 @@ class LLMCodeAnalyzer:
         Returns:
             Dictionary mapping file paths to their explanations
         """
-        if not self.api_key:
-            logger.warning("No API key available, skipping LLM analysis")
+
+        # For Azure, credential is handled by DefaultAzureCredential
+        if not self.client:
+            logger.warning("OpenAI client not available, skipping LLM analysis")
             return {}
         
         logger.info(f"Starting LLM analysis of {len(file_contents)} files")
@@ -721,36 +725,26 @@ Be specific and technical, but explain in a way that helps understanding rather 
         Raises:
             Exception: If API call fails
         """
-        if not self.client:
-            raise Exception("OpenAI client not available. Check API key configuration.")
-        
-        try:
-            # For Azure OpenAI, use the deployment name as the model
-            model_to_use = self.deployment_name if self.use_azure else self.model
 
-            # MCP servers instantiated for Azure DevOps and GitHub API integration
-            # This provides LLMs with structured access to repository analysis tools
-            
+        if not self.client:
+            raise Exception("OpenAI client not available. Check configuration.")
+        
+
+        try:
+            # Use deployment_name for Azure, model for OpenAI
+            model_to_use = self.deployment_name if self.use_azure else self.model
             response = await self.client.chat.completions.create(
-                model=model_to_use,                
+                model=model_to_use,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an expert software engineer who provides clear, detailed code analysis and explanations. Always respond with valid JSON format."
-                    },
-                    {
-                        "role": "user", 
-                        "content": prompt
-                    }
+                    {"role": "system", "content": "You are an expert software engineer who provides clear, detailed code analysis and explanations. Always respond with valid JSON format."},
+                    {"role": "user", "content": prompt}
                 ],
                 max_tokens=1500,
                 temperature=0.1,
                 timeout=60.0,
                 tools=[]
             )
-            
             return response.choices[0].message.content
-            
         except Exception as e:
             provider = "Azure OpenAI" if self.use_azure else "OpenAI"
             logger.error(f"{provider} API call failed: {e}")

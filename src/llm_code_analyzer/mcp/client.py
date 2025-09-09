@@ -1,6 +1,4 @@
-"""
-Model Context Protocol (MCP) Client implementation for interacting with repository analysis servers
-"""
+#Model Context Protocol (MCP) Client implementation for interacting with repository analysis servers
 
 import asyncio
 import json
@@ -15,9 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class MCPClient:
-    """
-    Model Context Protocol client for communicating with repository analysis servers
-    """
+  # Model Context Protocol client for communicating with repository analysis servers
     
     def __init__(self, server_url: Optional[str] = None):
         """

@@ -8,8 +8,32 @@ import logging
 from typing import Dict, List, Any, Optional, Callable
 from dataclasses import dataclass, asdict
 from abc import ABC, abstractmethod
+import os
+
+from .keyvault_helper import KeyVaultHelper
 
 logger = logging.getLogger(__name__)
+
+
+# Get Key Vault URL from environment variable or .env
+VAULT_URL = os.getenv("AZURE_KEYVAULT_URL")
+kv_helper = KeyVaultHelper(VAULT_URL) if VAULT_URL else None
+
+# Fetch secrets from Key Vault if available, else fallback to env
+def get_secret_or_env(secret_name, env_name):
+    if kv_helper:
+        try:
+            return kv_helper.get_secret(secret_name)
+        except Exception:
+            pass
+    return os.getenv(env_name)
+
+AZURE_DEVOPS_MCP_ENDPOINT = get_secret_or_env("AZURE_DEVOPS_MCP_ENDPOINT", "AZURE_DEVOPS_MCP_ENDPOINT")
+AZURE_DEVOPS_MCP_API_KEY = get_secret_or_env("AZURE_DEVOPS_MCP_API_KEY", "AZURE_DEVOPS_MCP_API_KEY")
+GITHUB_MCP_ENDPOINT = get_secret_or_env("GITHUB_MCP_ENDPOINT", "GITHUB_MCP_ENDPOINT")
+GITHUB_MCP_API_KEY = get_secret_or_env("GITHUB_MCP_API_KEY", "GITHUB_MCP_API_KEY")
+AZURE_OPENAI_ENDPOINT = get_secret_or_env("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_KEY = get_secret_or_env("AZURE_OPENAI_API_KEY", "AZURE_OPENAI_API_KEY")
 
 
 @dataclass
