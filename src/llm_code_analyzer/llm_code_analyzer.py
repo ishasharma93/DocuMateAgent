@@ -189,12 +189,324 @@ class LLMCodeAnalyzer:
             '.ps1': 'PowerShell'
         }
     
+    def _clone_repo(self, repository_url: str):
+        """Clone a repository to a temporary directory and return the cloned path (Path) and tmpdir."""
+        import tempfile
+        import subprocess
+        import shutil
+        from pathlib import Path
+
+        tmpdir = tempfile.mkdtemp(prefix="repo_clone_")
+        cloned_path = Path(tmpdir) / Path(repository_url.rstrip('/').split('/')[-1].replace('.git', ''))
+        try:
+            logger.info(f"Cloning {repository_url} -> {cloned_path}")
+            subprocess.run(["git", "clone", repository_url, str(cloned_path)], check=True)
+        except Exception as e:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise
+        return tmpdir, cloned_path
+
+    def _collect_code_files(self, cloned_path: 'Path') -> tuple:
+        """Walk a cloned repo and collect relevant files and compute total size."""
+        from pathlib import Path
+        import os
+
+        file_contents = {}
+        total_size = 0
+        for root, dirs, files in os.walk(cloned_path):
+            for fname in files:
+                fpath = Path(root) / fname
+                rel_path = str(fpath.relative_to(cloned_path))
+                _, ext = os.path.splitext(fname)
+                include_ext = ext.lower() in self.code_extensions or fname.lower() in (
+                    'package.json', 'requirements.txt', 'pyproject.toml', 'pom.xml', 'Dockerfile', 'Makefile', 'README.md')
+                if include_ext:
+                    try:
+                        content = fpath.read_text(encoding='utf-8')
+                    except Exception:
+                        try:
+                            content = fpath.read_text(encoding='latin-1')
+                        except Exception:
+                            logger.warning(f"Failed to read file {fpath}, skipping")
+                            continue
+                    file_contents[rel_path] = content
+                    total_size += len(content)
+        return file_contents, total_size
+
+    async def _create_github_issues(self, owner: str, repo: str, code_insights: Dict[str, Any], llm_analysis: Dict[str, CodeExplanation], cloned_path) -> List[str]:
+        """Create GitHub issues for technical debt candidates and return list of created issue URLs."""
+        created_issues = []
+        try:
+            token = None
+            if self.github_mcp_client and getattr(self.github_mcp_client, 'github_token', None):
+                token = self.github_mcp_client.github_token
+            elif os.getenv('GITHUB_TOKEN'):
+                token = os.getenv('GITHUB_TOKEN')
+
+            if not token:
+                return created_issues
+
+            import aiohttp
+
+            candidates = []
+            for theme in code_insights.get('improvement_themes', []):
+                candidates.append(f"Investigate: {theme}")
+            for explanation in llm_analysis.values():
+                try:
+                    if hasattr(explanation, 'improvement_suggestions') and explanation.improvement_suggestions:
+                        for sugg in explanation.improvement_suggestions:
+                            if isinstance(sugg, str) and sugg.strip():
+                                candidates.append(sugg.strip())
+                            elif isinstance(sugg, dict):
+                                candidates.append(sugg.get('text') or sugg.get('description') or str(sugg))
+                except Exception:
+                    continue
+
+            # Deduplicate
+            unique = []
+            seen = set()
+            for c in candidates:
+                k = c.strip().lower()[:200]
+                if k and k not in seen:
+                    seen.add(k)
+                    unique.append(c.strip())
+
+            issues_url = f"https://api.github.com/repos/{owner}/{repo}/issues"
+            headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json'}
+
+            async with aiohttp.ClientSession(headers=headers) as session:
+                # fetch open issues (first page)
+                existing_titles = []
+                try:
+                    async with session.get(issues_url, params={'state': 'open', 'per_page': 100}) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            existing_titles = [it.get('title', '').lower() for it in data if isinstance(it, dict)]
+                except Exception:
+                    existing_titles = []
+
+                for cand in unique:
+                    title = cand if len(cand) <= 120 else cand[:117] + '...'
+                    if title.lower() in existing_titles:
+                        continue
+                    body = f"Automated technical debt identified by DocuMateAgent LLM analysis:\n\n{cand}\n\nSee generated report at: {str(cloned_path / 'TechnicalDocument.md')}\n"
+                    payload = {'title': title, 'body': body, 'labels': ['technical-debt', 'automated']}
+                    try:
+                        async with session.post(issues_url, json=payload) as post:
+                            if post.status in (200, 201):
+                                created = await post.json()
+                                created_issues.append(created.get('html_url'))
+                            else:
+                                logger.warning(f"Failed to create issue for candidate: {cand[:80]} (status {post.status})")
+                    except Exception as e:
+                        logger.warning(f"Exception while creating issue: {e}")
+
+        except Exception as e:
+            logger.warning(f"Issue creation step failed: {e}")
+        return created_issues
+
+    async def _create_azure_workitems(self, org: str, project: str, code_insights: Dict[str, Any], llm_analysis: Dict[str, CodeExplanation], cloned_path) -> List[str]:
+        """Create Azure DevOps work items for technical debt candidates and return list of created work item URLs."""
+        created_items = []
+        try:
+            if not self.azure_devops_client or not getattr(self.azure_devops_client, 'personal_access_token', None):
+                return created_items
+
+            token_header = self.azure_devops_client.auth_header
+            import aiohttp
+
+            candidates = []
+            for theme in code_insights.get('improvement_themes', []):
+                candidates.append(f"Investigate: {theme}")
+            for explanation in llm_analysis.values():
+                try:
+                    if hasattr(explanation, 'improvement_suggestions') and explanation.improvement_suggestions:
+                        for sugg in explanation.improvement_suggestions:
+                            if isinstance(sugg, str) and sugg.strip():
+                                candidates.append(sugg.strip())
+                            elif isinstance(sugg, dict):
+                                candidates.append(sugg.get('text') or sugg.get('description') or str(sugg))
+                except Exception:
+                    continue
+
+            # Deduplicate
+            unique = []
+            seen = set()
+            for c in candidates:
+                k = c.strip().lower()[:200]
+                if k and k not in seen:
+                    seen.add(k)
+                    unique.append(c.strip())
+
+            # Azure DevOps work item create endpoint
+            base = self.azure_devops_client.base_url  # https://dev.azure.com/{org}
+            api_ver = self.azure_devops_client.api_version
+            async with aiohttp.ClientSession(headers={'Authorization': token_header, 'Content-Type': 'application/json-patch+json'}) as session:
+                for cand in unique:
+                    # construct patch body
+                    title = cand if len(cand) <= 120 else cand[:117] + '...'
+                    description = f"Automated technical debt identified by DocuMateAgent LLM analysis:\n\n{cand}\n\nSee generated report at: {str(cloned_path / 'TechnicalDocument.md')}\n"
+                    patch = [
+                        {"op": "add", "path": "/fields/System.Title", "value": title},
+                        {"op": "add", "path": "/fields/System.Description", "value": description}
+                    ]
+                    url = f"{base}/{project}/_apis/wit/workitems/$Issue?api-version={api_ver}"
+                    try:
+                        async with session.post(url, json=patch) as resp:
+                            if resp.status in (200, 201):
+                                data = await resp.json()
+                                created_items.append(data.get('url') or data.get('id'))
+                            else:
+                                logger.warning(f"Failed to create Azure work item for candidate: {cand[:80]} (status {resp.status})")
+                    except Exception as e:
+                        logger.warning(f"Exception while creating Azure work item: {e}")
+        except Exception as e:
+            logger.warning(f"Azure work item creation failed: {e}")
+        return created_items
+
+    async def _analyze_repository_local(self, repository_url: str, platform: str, identifiers: Dict[str, str], repo_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Shared flow: clone repo, collect files, run LLM analysis, generate docs, and create issues/work items."""
+        from pathlib import Path
+        import os
+
+        results: Dict[str, Any] = {}
+
+        # 1) Clone
+        tmpdir, cloned_path = self._clone_repo(repository_url)
+
+        # 2) Collect files
+        file_contents, total_size = self._collect_code_files(cloned_path)
+        results['collected_files'] = len(file_contents)
+
+        # 3) Run LLM analysis (temporarily increase max)
+        prev_max = os.environ.get('MAX_FILES_FOR_LLM_ANALYSIS')
+        os.environ['MAX_FILES_FOR_LLM_ANALYSIS'] = str(len(file_contents) or 1)
+        try:
+            llm_analysis = await self.analyze_codebase(file_contents)
+        finally:
+            if prev_max is None:
+                os.environ.pop('MAX_FILES_FOR_LLM_ANALYSIS', None)
+            else:
+                os.environ['MAX_FILES_FOR_LLM_ANALYSIS'] = prev_max
+
+        results['llm_analysis_count'] = len(llm_analysis)
+
+        # 4) Insights
+        code_insights = self.generate_code_insights_summary(llm_analysis)
+        results['code_insights'] = code_insights
+
+        # 5) Minimal structure/dependency/code_metrics (same as previous logic)
+        structure_analysis = {'total_files': len(file_contents), 'total_size': total_size, 'languages': {}, 'file_distribution': {}, 'source_files': [], 'test_files': [], 'config_files': [], 'documentation_files': [], 'build_files': [], 'largest_files': []}
+        for path_str, content in file_contents.items():
+            ext = Path(path_str).suffix.lower()
+            lang = self.code_extensions.get(ext)
+            if lang:
+                structure_analysis['languages'][lang] = structure_analysis['languages'].get(lang, 0) + 1
+                structure_analysis['source_files'].append(path_str)
+            lower = path_str.lower()
+            if 'test' in lower or lower.startswith('tests') or '/tests/' in lower:
+                structure_analysis['test_files'].append(path_str)
+            if any(cfg in lower for cfg in ['package.json', 'requirements.txt', 'pyproject.toml', 'pom.xml', 'setup.py']):
+                structure_analysis['config_files'].append(path_str)
+            if any(doc in lower for doc in ['readme', 'changelog', 'license', 'contributing']):
+                structure_analysis['documentation_files'].append(path_str)
+            if any(build in path_str for build in ['Dockerfile', 'Makefile']):
+                structure_analysis['build_files'].append(path_str)
+        largest = sorted([(p, len(c)) for p, c in file_contents.items()], key=lambda x: x[1], reverse=True)[:10]
+        structure_analysis['largest_files'] = largest
+
+        # basic dependency analysis
+        dependency_analysis = {'dependencies': {}, 'dev_dependencies': {}, 'package_managers': [], 'frameworks': [], 'build_tools': [], 'testing_frameworks': []}
+        if any(f for f in file_contents if f.lower().endswith('requirements.txt')):
+            dependency_analysis['package_managers'].append('pip')
+        if any(f for f in file_contents if f.lower().endswith('package.json')):
+            dependency_analysis['package_managers'].append('npm')
+        if any(f for f in file_contents if f.lower().endswith('pom.xml')):
+            dependency_analysis['package_managers'].append('maven')
+
+        # code metrics
+        total_lines = code_lines = comment_lines = blank_lines = 0
+        languages_metrics = {}
+        for path_str, content in file_contents.items():
+            lines = content.splitlines()
+            total_lines += len(lines)
+            for ln in lines:
+                stripped = ln.strip()
+                if not stripped:
+                    blank_lines += 1
+                elif stripped.startswith('#') or stripped.startswith('//'):
+                    comment_lines += 1
+                else:
+                    code_lines += 1
+            lang = self.code_extensions.get(Path(path_str).suffix.lower(), 'Unknown')
+            lm = languages_metrics.setdefault(lang, {'files': 0, 'lines': 0, 'code_lines': 0, 'comment_lines': 0})
+            lm['files'] += 1
+            lm['lines'] += len(lines)
+            lm['code_lines'] += max(0, len(lines) - 1)
+            lm['comment_lines'] += comment_lines
+
+        code_metrics = {'total_lines': total_lines, 'code_lines': code_lines, 'comment_lines': comment_lines, 'blank_lines': blank_lines, 'files_analyzed': len(file_contents), 'languages': languages_metrics, 'complexity_indicators': {'large_files': [{'file': p, 'lines': l} for p, l in largest], 'deeply_nested': []}}
+
+        # 6) Generate markdown files
+        from src.markdown_generator import MarkdownGenerator
+        md = MarkdownGenerator()
+        try:
+            functional_md = md.generate_quick_summary(repo_info or {}, structure_analysis)
+            functional_path = cloned_path / 'FunctionalDocument.md'
+            functional_path.write_text(functional_md, encoding='utf-8')
+
+            technical_md = md.generate_summary(repo_info or {}, structure_analysis, dependency_analysis, code_metrics, {}, file_contents, llm_analysis, code_insights)
+            technical_path = cloned_path / 'TechnicalDocument.md'
+            technical_path.write_text(technical_md, encoding='utf-8')
+
+            build_md_lines = [f"# Build & Run Instructions for {identifiers.get('repo', '') or identifiers.get('repository', '')}\n"]
+            if any('dockerfile' in f.lower() for f in file_contents):
+                build_md_lines.append('## Docker\n')
+                build_md_lines.append('```bash\n# Build the image\ndocker build -t myapp:latest .\n# Run the container\ndocker run -p 8080:8080 myapp:latest\n```\n')
+            if any(f.lower().endswith('package.json') for f in file_contents):
+                build_md_lines.append('## Node.js / npm\n')
+                build_md_lines.append('```bash\n# Install\nnpm install\n# Run\nnpm start\n```\n')
+            if any(f.lower().endswith('requirements.txt') for f in file_contents):
+                build_md_lines.append('## Python\n')
+                build_md_lines.append('```bash\n# Create venv\npython -m venv .venv\nsource .venv/bin/activate  # or .\\.venv\\Scripts\\activate on Windows\n# Install deps\npip install -r requirements.txt\n# Run main if exists\npython main.py\n```\n')
+            if any(f.lower().endswith('makefile') or f == 'Makefile' for f in file_contents):
+                build_md_lines.append('## Makefile\n')
+                build_md_lines.append('```bash\n# Build\nmake build\n# Run\nmake run\n```\n')
+
+            build_md = '\n'.join(build_md_lines)
+            build_path = cloned_path / 'CodeBuild&Run.md'
+            build_path.write_text(build_md, encoding='utf-8')
+
+            results['generated_documents'] = {'functional': str(functional_path), 'technical': str(technical_path), 'build_and_run': str(build_path)}
+        except Exception as e:
+            logger.error(f"Failed to generate markdown documents: {e}")
+            results['generated_documents_error'] = str(e)
+
+        # 7) Create issues/work items based on platform
+        if platform == 'github':
+            owner = identifiers.get('owner')
+            repo_name = identifiers.get('repo')
+            created = await self._create_github_issues(owner, repo_name, code_insights, llm_analysis, cloned_path)
+            if created:
+                results['created_issues'] = created
+        elif platform == 'azure_devops':
+            org = identifiers.get('org')
+            project = identifiers.get('project')
+            created = await self._create_azure_workitems(org, project, code_insights, llm_analysis, cloned_path)
+            if created:
+                results['created_workitems'] = created
+
+        # 8) return results
+        results['cloned_path'] = str(cloned_path)
+        results['files_analyzed'] = list(file_contents.keys())
+        return results
+
     async def analyze_repository_with_mcp(self, 
                                          repository_url: str,
                                          repository_type: str = "github") -> Dict[str, Any]:
         """
         Analyze a repository using MCP server-client architecture
-        
+
         Args:
             repository_url: Repository URL (GitHub or Azure DevOps)
             repository_type: Type of repository ("github" or "azure_devops")
@@ -205,7 +517,7 @@ class LLMCodeAnalyzer:
         if not self.mcp_enabled:
             logger.warning("MCP not enabled, falling back to basic analysis")
             return {"error": "MCP not enabled"}
-        
+
         try:
             if repository_type == "github":
                 return await self._analyze_github_repository(repository_url)
@@ -218,55 +530,39 @@ class LLMCodeAnalyzer:
             return {"error": str(e)}
     
     async def _analyze_github_repository(self, repository_url: str) -> Dict[str, Any]:
-        """Analyze GitHub repository using MCP client"""
+        """Analyze GitHub repository using MCP client
+
+        This implementation clones the repository locally, collects all code files,
+        runs LLM analysis against all files, and generates three markdown documents:
+        - FunctionalDocument.md (high-level / functional overview)
+        - TechnicalDocument.md (detailed technical summary)
+        - CodeBuild&Run.md (build & run instructions)
+        """
         if not self.github_mcp_client:
             raise Exception("GitHub MCP client not initialized")
-        
-        # Parse repository URL to extract owner and repo
+
         import re
+        from src.markdown_generator import MarkdownGenerator
+
         match = re.match(r'https://github\.com/([^/]+)/([^/]+)/?', repository_url)
         if not match:
             return {"error": "Invalid GitHub repository URL"}
-        
+
         owner, repo = match.groups()
-        repo = repo.rstrip('.git')  # Remove .git suffix if present
-        
-        logger.info(f"Analyzing GitHub repository: {owner}/{repo}")
-        
-        # Gather repository information using MCP tools
-        analysis_results = {}
-        
+        repo = repo.rstrip('.git')
+
+        logger.info(f"Analyzing GitHub repository (clone): {owner}/{repo}")
+
+        results: Dict[str, Any] = {}
+
+        # Shared analysis flow: clone, collect files, analyze, generate docs, create issues
+        identifiers = {'owner': owner, 'repo': repo, 'repository': repo}
         try:
-            # Get basic repository info
-            repo_info = await self.github_mcp_client._get_repository_info(owner, repo)
-            analysis_results['repository_info'] = repo_info
-            
-            # Get repository structure
-            contents = await self.github_mcp_client._get_repository_contents(owner, repo)
-            analysis_results['contents'] = contents
-            
-            # Get languages
-            languages = await self.github_mcp_client._get_languages(owner, repo)
-            analysis_results['languages'] = languages
-            
-            # Get recent commits
-            commits = await self.github_mcp_client._get_commits(owner, repo, per_page=5)
-            analysis_results['recent_commits'] = commits
-            
-            # Get branches
-            branches = await self.github_mcp_client._get_branches(owner, repo, per_page=5)
-            analysis_results['branches'] = branches
-            
-            # Get pull requests
-            pull_requests = await self.github_mcp_client._get_pull_requests(owner, repo, per_page=5)
-            analysis_results['pull_requests'] = pull_requests
-            
-            logger.info(f"GitHub MCP analysis completed for {owner}/{repo}")
-            return analysis_results
-            
+            return await self._analyze_repository_local(repository_url, "github", identifiers)
         except Exception as e:
-            logger.error(f"GitHub MCP analysis failed for {owner}/{repo}: {e}")
-            raise
+            logger.error(f"GitHub repository analysis failed: {e}")
+            results['error'] = str(e)
+            return results
     
     async def _analyze_azure_devops_repository(self, repository_url: str) -> Dict[str, Any]:
         """Analyze Azure DevOps repository using MCP client"""
@@ -287,31 +583,16 @@ class LLMCodeAnalyzer:
         logger.info(f"Analyzing Azure DevOps repository: {org}/{project}/{repo}")
         
         # Gather repository information using MCP tools
-        analysis_results = {}
+        results = {}
         
+        # Shared analysis flow: clone, collect files, analyze, generate docs, create issues
+        identifiers = {'org': org, 'project': project, 'repo': repo}
         try:
-            # Get basic repository info
-            repo_info = await self.azure_devops_client._get_repository_info(project, repo)
-            analysis_results['repository_info'] = repo_info
-            
-            # Get repository structure
-            contents = await self.azure_devops_client._get_repository_contents(project, repo)
-            analysis_results['contents'] = contents
-            
-            # Get recent commits
-            commits = await self.azure_devops_client._get_commits(project, repo, top=5)
-            analysis_results['recent_commits'] = commits
-            
-            # Get pull requests
-            pull_requests = await self.azure_devops_client._get_pull_requests(project, repo)
-            analysis_results['pull_requests'] = pull_requests
-            
-            logger.info(f"Azure DevOps MCP analysis completed for {org}/{project}/{repo}")
-            return analysis_results
-            
+            return await self._analyze_repository_local(repository_url, "azure_devops", identifiers)
         except Exception as e:
-            logger.error(f"Azure DevOps MCP analysis failed for {org}/{project}/{repo}: {e}")
-            raise
+            logger.error(f"Azure DevOps repository analysis failed: {e}")
+            results['error'] = str(e)
+            return results
     
     async def get_mcp_repository_files(self, 
                                       repository_url: str,
